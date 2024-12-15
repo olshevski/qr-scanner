@@ -1,16 +1,14 @@
 package dev.olshevski.qrscanner
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Size
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
-import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCapture.OnImageCapturedCallback
@@ -26,6 +24,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import dev.olshevski.qrscanner.databinding.FragmentCameraBinding
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 class CameraFragment : Fragment() {
@@ -36,7 +35,8 @@ class CameraFragment : Fragment() {
     private lateinit var cameraController: LifecycleCameraController
     private lateinit var barcodeScanner: BarcodeScanner
 
-    private var takePictureExecutor = Executors.newSingleThreadExecutor()
+    private lateinit var mainExecutor: Executor
+    private val takePictureExecutor = Executors.newSingleThreadExecutor()
 
     private val activityResultLauncher =
         registerForActivityResult(
@@ -69,6 +69,8 @@ class CameraFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        mainExecutor = ContextCompat.getMainExecutor(requireContext())
+
         // Request camera permissions
         if (allPermissionsGranted()) {
             startCamera()
@@ -77,8 +79,6 @@ class CameraFragment : Fragment() {
         }
     }
 
-    @OptIn(ExperimentalZeroShutterLag::class)
-    @SuppressLint("ClickableViewAccessibility")
     private fun startCamera() {
         cameraController = LifecycleCameraController(requireContext())
         val previewView: PreviewView = viewBinding.root
@@ -89,11 +89,11 @@ class CameraFragment : Fragment() {
         barcodeScanner = BarcodeScanning.getClient(options)
 
         cameraController.setImageAnalysisAnalyzer(
-            ContextCompat.getMainExecutor(requireContext()),
+            mainExecutor,
             MlKitAnalyzer(
                 listOf(barcodeScanner),
                 ImageAnalysis.COORDINATE_SYSTEM_VIEW_REFERENCED,
-                ContextCompat.getMainExecutor(requireContext())
+                mainExecutor
             ) { result: MlKitAnalyzer.Result? ->
                 val barcodeResults = result?.getValue(barcodeScanner)
                 if ((barcodeResults == null) ||
@@ -101,6 +101,7 @@ class CameraFragment : Fragment() {
                     (barcodeResults.first() == null)
                 ) {
                     previewView.overlay.clear()
+                    // noinspection ClickableViewAccessibility
                     previewView.setOnTouchListener { _, _ -> false } //no-op
                     return@MlKitAnalyzer
                 }
@@ -116,7 +117,9 @@ class CameraFragment : Fragment() {
             }
         )
 
-        cameraController.imageCaptureMode = ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+        // ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG may be used here for even faster performance,
+        // but the quality of the taken photo is awful (at least on my Pixel 3 device)
+        cameraController.imageCaptureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
         cameraController.isPinchToZoomEnabled = false
 
         cameraController.bindToLifecycle(this)
@@ -124,15 +127,33 @@ class CameraFragment : Fragment() {
     }
 
     private fun handleBarcodeClick(barcode: Barcode) {
-        if (barcode.boundingBox == null || barcode.rawValue == null) return
+        val barcodeBoundingBox = barcode.boundingBox
+        val barcodeRawValue = barcode.rawValue
+        if (barcodeBoundingBox == null || barcodeBoundingBox.isEmpty || barcodeRawValue.isNullOrEmpty()) return
+
+        val previewSize = viewBinding.root.let { Size(it.width, it.height) }
 
         cameraController.takePicture(takePictureExecutor, object : OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
-                image.setCropRect(barcode.boundingBox)
-                viewModel.setBarcodeData(BarcodeData(
-                    text = barcode.rawValue!!,
-                    image = image.toBitmap()
-                ))
+                val croppedBitmap = cropQRCodeFromImage(
+                    image = image,
+                    previewSize = previewSize,
+                    barcodeRect = barcodeBoundingBox
+                )
+                mainExecutor.execute {
+                    if (croppedBitmap != null) {
+                        viewModel.setBarcodeData(
+                            BarcodeData(
+                                text = barcodeRawValue,
+                                image = croppedBitmap
+                            )
+                        )
+                    } else {
+                        context?.let {
+                            Toast.makeText(it, "Failed to crop QR code", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
             }
         })
     }
