@@ -34,6 +34,11 @@ class PreviewFragment : Fragment() {
             viewBinding.image.setImageBitmap(it.image)
         }.launchIn(viewLifecycleOwner.lifecycleScope)
 
+        viewBinding.copyTextButton.setOnClickListener {
+            viewModel.copyBarcodeTextToClipboard()
+
+        }
+
         requireActivity().onBackPressedDispatcher.addCallback(
             viewLifecycleOwner,
             object : OnBackPressedCallback(true) {
